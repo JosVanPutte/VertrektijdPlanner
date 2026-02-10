@@ -1,26 +1,25 @@
 #include <WiFi.h>
 
+#include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "time.h"
+#include "storage.h"
 
 // Tijd instellingen
 const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = 3600; // Nederland (Wintertijd = 3600, Zomertijd = 7200)
-const int   daylightOffset_sec = 3600; // Zet op 3600 als het zomertijd is
 
 String urlEncode(const char *s);
 void voerUpdateUit();
 
 // Instellingen
-const char* ssid = "vanPutte";
-const char* password = "vanputte";
-String van = urlEncode("van Maanenstraat 24, Vlaardingen, Nederland");
-String naar = urlEncode("Lange Kleiweg 12, Rijswijk, Nederland");
-String scriptUrl = "https://script.google.com/macros/s/AKfycbwDx259LxLCEk1udjipwHFzu6TmGXWtHFOgB17pChjpt1VowNhGMvsWk0sdbOh9Z3P8/exec?van=" + van + "&naar=" + naar;
+String scriptUrl; 
+char van_adres[64];
+char naar_adres[64];
+bool shouldSaveConfig = false;
  
 // OLED Display instellingen
 #define SCREEN_WIDTH 128
@@ -30,7 +29,10 @@ String scriptUrl = "https://script.google.com/macros/s/AKfycbwDx259LxLCEk1udjipw
 #define I2C_ADDR 0x3C
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
-
+// De callback die wordt aangeroepen als de gebruiker op 'Save' klikt
+void saveConfigCallback() {
+  shouldSaveConfig = true;
+}
 String urlEncode(const char *s) {
   String str = s;
   String encodedString = "";
@@ -56,6 +58,34 @@ void enterDeepSleep(uint64_t seconds) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
+  nvs_handle_t nvs = initNvs();
+  String savedVan = getNonVolatile(nvs, "van_param");
+  String savedNaar = getNonVolatile(nvs, "naar_param");
+  strncpy(van_adres, savedVan.c_str(), sizeof(van_adres));
+  strncpy(naar_adres, savedNaar.c_str(), sizeof(naar_adres));
+  WiFiManager wm;
+  wm.setSaveConfigCallback(saveConfigCallback);
+  if (savedVan.isEmpty()) {
+    wm.resetSettings();
+  }
+  WiFiManagerParameter custom_van("van", "Vertrekadres", van_adres, 64);
+  WiFiManagerParameter custom_naar("naar", "Bestemming", naar_adres, 64);
+  
+  wm.addParameter(&custom_van);
+  wm.addParameter(&custom_naar);
+
+  // Start de portal
+  if (!wm.autoConnect("VertrekTijdPlanner")) {
+    delay(3000);
+    ESP.restart();
+  }
+  if (shouldSaveConfig) {
+    setNonVolatile(nvs, "van_param", custom_van.getValue());
+    setNonVolatile(nvs, "naar_param", custom_naar.getValue());
+  }
+  String vanEncoded = urlEncode(custom_van.getValue());
+  String naarEncoded = urlEncode(custom_naar.getValue());
+  scriptUrl = "https://script.google.com/macros/s/AKfycbwDx259LxLCEk1udjipwHFzu6TmGXWtHFOgB17pChjpt1VowNhGMvsWk0sdbOh9Z3P8/exec?van=" + vanEncoded + "&naar=" + naarEncoded;
 
   // 1. Scherm en I2C initialisatie
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -64,10 +94,6 @@ void setup() {
   }
   display.clearDisplay();
   display.setTextColor(WHITE);
-
-  // 2. WiFi en Tijd
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
   
   configTime(0, 0, ntpServer);
   setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1); // Nederland (Winter & Zomer)
